@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cctracker — Claude Code Productivity</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    --blue: #58a6ff; --purple: #bc8cff;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 14px; line-height: 1.5;
+    padding: 24px; max-width: 1100px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  h2 { font-size: 15px; font-weight: 600; color: var(--muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 32px; }
+  .section { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+  .error-banner { background: #3d1a1a; border: 1px solid var(--red); border-radius: 6px; padding: 12px 16px; margin-bottom: 20px; color: var(--red); display: none; }
+  .loading { color: var(--muted); font-style: italic; padding: 20px 0; }
+  .empty-state { text-align: center; padding: 48px 20px; color: var(--muted); }
+  .empty-state p { font-size: 15px; margin-bottom: 8px; }
+  .empty-state code { background: var(--bg3); padding: 2px 6px; border-radius: 4px; font-size: 13px; color: var(--blue); }
+
+  /* Verdict */
+  .verdict-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .verdict-item:last-child { border-bottom: none; }
+  .verdict-icon { font-size: 16px; width: 20px; }
+  .verdict-label { font-weight: 500; }
+  .verdict-detail { color: var(--muted); font-size: 13px; margin-left: auto; }
+  .progress-bar-outer { background: var(--bg3); border-radius: 4px; height: 6px; width: 100px; display: inline-block; vertical-align: middle; }
+  .progress-bar-inner { background: var(--blue); border-radius: 4px; height: 100%; transition: width .3s; }
+
+  /* Plugin table */
+  table { width: 100%; border-collapse: collapse; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: none; }
+  tr.low-data { opacity: .55; }
+  .tag-low { font-size: 11px; color: var(--muted); margin-left: 6px; }
+  .tag-baseline { font-size: 11px; color: var(--yellow); margin-left: 6px; }
+
+  /* Hero stats */
+  .hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .hero-card { background: var(--bg3); border-radius: 6px; padding: 16px; }
+  .hero-card .val { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--blue); }
+  .hero-card .lbl { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+  /* Charts */
+  .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 640px) { .chart-row { grid-template-columns: 1fr; } }
+  svg text { font-family: system-ui, -apple-system, sans-serif; }
+</style>
+</head>
+<body>
+<h1>cctracker</h1>
+<p class="subtitle">Claude Code productivity metrics — anonymous, aggregated</p>
+
+<div id="error-banner" class="error-banner"></div>
+
+<div id="app">
+  <div class="loading">Loading...</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt1 = n => Number(n).toFixed(1);
+const fmt2 = n => Number(n).toFixed(2);
+const pct = n => (Number(n)*100).toFixed(0) + '%';
+
+async function load() {
+  try {
+    const [statsRes, pluginsRes] = await Promise.all([
+      fetch('/api/stats'),
+      fetch('/api/stats/plugins')
+    ]);
+    if (!statsRes.ok || !pluginsRes.ok) {
+      const code = !statsRes.ok ? statsRes.status : pluginsRes.status;
+      showError(`Dashboard error: ${code}. Is the backend running?`);
+      return;
+    }
+    const stats = await statsRes.json();
+    const plugins = await pluginsRes.json();
+    render(stats, plugins);
+  } catch (e) {
+    showError(`Dashboard error: ${e.message}. Is the backend running?`);
+  }
+}
+
+function showError(msg) {
+  const b = $('error-banner');
+  b.textContent = msg;
+  b.style.display = 'block';
+  $('app').innerHTML = '';
+}
+
+function render(stats, plugins) {
+  if (stats.total_sessions === 0) {
+    $('app').innerHTML = `
+      <div class="empty-state">
+        <p>No sessions yet.</p>
+        <p>Run <code>/track</code> in a Claude Code session to start tracking.</p>
+      </div>`;
+    return;
+  }
+
+  const html = `
+    ${renderVerdict(plugins)}
+    ${renderPluginTable(plugins)}
+    ${renderHero(stats)}
+    <div class="chart-row">
+      ${renderTaskChart(stats.task_type_distribution)}
+      ${renderReworkDonut(stats.rework_distribution)}
+    </div>
+  `;
+  $('app').innerHTML = html;
+}
+
+function renderVerdict(plugins) {
+  const baseline = plugins.find(p => p.plugins === 'none');
+  const baselineSat = baseline ? baseline.avg_satisfaction : null;
+
+  const items = plugins.map(p => {
+    if (p.plugins === 'none') {
+      return `<div class="verdict-item">
+        <span class="verdict-icon">📊</span>
+        <span class="verdict-label">none (baseline)</span>
+        <span class="verdict-detail">${p.session_count} sessions</span>
+      </div>`;
+    }
+    if (p.session_count < 20) {
+      const pct = Math.min(p.session_count / 20 * 100, 100);
+      return `<div class="verdict-item">
+        <span class="verdict-icon">📊</span>
+        <span class="verdict-label">${escHtml(p.plugins)}</span>
+        <span class="verdict-detail">
+          ${p.session_count}/20 sessions to unlock verdict
+          <span class="progress-bar-outer"><span class="progress-bar-inner" style="width:${pct}%"></span></span>
+        </span>
+      </div>`;
+    }
+    if (baselineSat === null) {
+      return `<div class="verdict-item">
+        <span class="verdict-icon">~</span>
+        <span class="verdict-label">${escHtml(p.plugins)}</span>
+        <span class="verdict-detail">No baseline (no "none" sessions yet)</span>
+      </div>`;
+    }
+    const diff = p.avg_satisfaction - baselineSat;
+    let icon, msg;
+    if (diff > 0.3) {
+      icon = '✓'; msg = `appears to help (+${fmt1(diff)} pts satisfaction)`;
+    } else if (diff < -0.3) {
+      icon = '✗'; msg = `appears to hurt satisfaction vs baseline (${fmt1(diff)} pts)`;
+    } else {
+      icon = '~'; msg = 'No significant difference detected yet';
+    }
+    return `<div class="verdict-item">
+      <span class="verdict-icon">${icon}</span>
+      <span class="verdict-label">${escHtml(p.plugins)}</span>
+      <span class="verdict-detail">${msg}</span>
+    </div>`;
+  }).join('');
+
+  return `<div class="section">
+    <h2>Is it worth it?</h2>
+    ${items || '<p class="loading">No plugin data yet.</p>'}
+  </div>`;
+}
+
+function renderPluginTable(plugins) {
+  const rows = plugins.map(p => {
+    const lowData = p.session_count < 20;
+    const isBaseline = p.plugins === 'none';
+    const satDisplay = `${fmt1(p.min_satisfaction)} / ${fmt1(p.avg_satisfaction)} / ${fmt1(p.max_satisfaction)}`;
+    return `<tr class="${lowData ? 'low-data' : ''}">
+      <td>${escHtml(p.plugins)}
+        ${isBaseline ? '<span class="tag-baseline">baseline</span>' : ''}
+        ${lowData && !isBaseline ? '<span class="tag-low">low data</span>' : ''}
+      </td>
+      <td>${p.session_count}</td>
+      <td title="min/avg/max">${satDisplay}</td>
+      <td>${fmt1(p.avg_duration_mins)}m</td>
+      <td>${fmt1(p.avg_rework_score)}</td>
+      <td>${pct(p.completion_rate)}</td>
+      <td>$${fmt2(p.avg_token_cost)}</td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="section">
+    <h2>Plugin comparison</h2>
+    <table>
+      <thead><tr>
+        <th>Plugins</th><th>Sessions</th><th>Satisfaction (min/avg/max)</th>
+        <th>Avg Duration</th><th>Avg Rework</th><th>Completion</th><th>Avg Cost</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderHero(stats) {
+  return `<div class="section">
+    <h2>Overview</h2>
+    <div class="hero">
+      <div class="hero-card"><div class="val">${stats.total_sessions}</div><div class="lbl">Total Sessions</div></div>
+      <div class="hero-card"><div class="val">${stats.total_users}</div><div class="lbl">Total Users</div></div>
+      <div class="hero-card"><div class="val">${fmt1(stats.avg_duration_mins)}m</div><div class="lbl">Avg Duration</div></div>
+      <div class="hero-card"><div class="val">${pct(stats.completion_rate)}</div><div class="lbl">Completion Rate</div></div>
+    </div>
+  </div>`;
+}
+
+function renderTaskChart(dist) {
+  if (!dist || !Object.keys(dist).length) return '<div class="section"><h2>Task Types</h2><p class="loading">No data.</p></div>';
+  const entries = Object.entries(dist).sort((a,b) => b[1]-a[1]);
+  const max = Math.max(...entries.map(e => e[1]));
+  const barHeight = 22, gap = 6, labelW = 80, barMaxW = 220, numW = 40;
+  const svgH = entries.length * (barHeight + gap);
+  const bars = entries.map(([k, v], i) => {
+    const y = i * (barHeight + gap);
+    const w = max > 0 ? Math.round(v / max * barMaxW) : 0;
+    return `<text x="${labelW-6}" y="${y + barHeight/2 + 5}" text-anchor="end" fill="#8b949e" font-size="12">${escHtml(k)}</text>
+      <rect x="${labelW}" y="${y}" width="${w}" height="${barHeight}" rx="3" fill="#58a6ff" opacity=".75"/>
+      <text x="${labelW + w + 6}" y="${y + barHeight/2 + 5}" fill="#e6edf3" font-size="12">${v}</text>`;
+  }).join('');
+  return `<div class="section">
+    <h2>Task Types</h2>
+    <svg width="${labelW + barMaxW + numW}" height="${svgH}" xmlns="http://www.w3.org/2000/svg">${bars}</svg>
+  </div>`;
+}
+
+function renderReworkDonut(dist) {
+  if (!dist || !Object.keys(dist).length) return '<div class="section"><h2>Rework Distribution</h2><p class="loading">No data.</p></div>';
+  const order = ['none', 'minor', 'moderate', 'heavy'];
+  const colors = ['#3fb950', '#58a6ff', '#d29922', '#f85149'];
+  const values = order.map(k => dist[k] || 0);
+  const total = values.reduce((a,b) => a+b, 0);
+  if (total === 0) return '<div class="section"><h2>Rework Distribution</h2><p class="loading">No data.</p></div>';
+
+  const cx = 80, cy = 80, r = 60, ir = 38;
+  let startAngle = -Math.PI/2;
+  const slices = values.map((v, i) => {
+    const angle = (v / total) * 2 * Math.PI;
+    const x1 = cx + r * Math.cos(startAngle);
+    const y1 = cy + r * Math.sin(startAngle);
+    const x2 = cx + r * Math.cos(startAngle + angle);
+    const y2 = cy + r * Math.sin(startAngle + angle);
+    const xi1 = cx + ir * Math.cos(startAngle);
+    const yi1 = cy + ir * Math.sin(startAngle);
+    const xi2 = cx + ir * Math.cos(startAngle + angle);
+    const yi2 = cy + ir * Math.sin(startAngle + angle);
+    const large = angle > Math.PI ? 1 : 0;
+    const d = `M${x1},${y1} A${r},${r} 0 ${large},1 ${x2},${y2} L${xi2},${yi2} A${ir},${ir} 0 ${large},0 ${xi1},${yi1} Z`;
+    startAngle += angle;
+    return `<path d="${d}" fill="${colors[i]}" opacity=".85"/>`;
+  }).join('');
+
+  const legend = order.map((k, i) => `
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+      <span style="width:10px;height:10px;border-radius:2px;background:${colors[i]};display:inline-block"></span>
+      <span style="font-size:12px;color:#8b949e">${k}</span>
+      <span style="font-size:12px;font-variant-numeric:tabular-nums;margin-left:auto">${values[i]}</span>
+    </div>`).join('');
+
+  return `<div class="section">
+    <h2>Rework Distribution</h2>
+    <div style="display:flex;gap:20px;align-items:center">
+      <svg width="160" height="160" xmlns="http://www.w3.org/2000/svg">
+        ${slices}
+        <text x="${cx}" y="${cy+5}" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">${total}</text>
+        <text x="${cx}" y="${cy+20}" text-anchor="middle" fill="#8b949e" font-size="10">sessions</text>
+      </svg>
+      <div style="flex:1">${legend}</div>
+    </div>
+  </div>`;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+load();
+</script>
+</body>
+</html>
