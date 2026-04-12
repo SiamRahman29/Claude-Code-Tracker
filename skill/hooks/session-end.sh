@@ -46,12 +46,13 @@ fi
 END_TS=$(date +%s)
 DURATION=$(( (END_TS - START_TS) / 60 ))
 
-# Guard: skip nonsensical durations
+# Guard: skip nonsensical durations (also catches START_TS=0 parse failure which yields ~29M minutes)
 [ "$DURATION" -le 0 ] && { _log_debug "Duration <= 0, skipping post"; rm -f "$SESSION_FILE" "$PID_FILE"; exit 0; }
+[ "$DURATION" -gt 1440 ] && { _log_debug "Duration > 24h ($DURATION min), likely bad start_ts — skipping post"; rm -f "$SESSION_FILE" "$PID_FILE"; exit 0; }
 
 # Compute anonymous user hash (portable: works on macOS + Linux)
 USER_HASH=$(echo -n "$(hostname)$(whoami)" | openssl dgst -sha256 2>/dev/null | awk '{print $2}' | cut -c1-12)
-[ -z "$USER_HASH" ] && USER_HASH="unknown"
+[ -z "$USER_HASH" ] && USER_HASH="fallbackuser"
 
 # Compute token cost from accumulated token data (written by token-accumulator.sh PostToolUse hook)
 TOKENS_FILE=~/.cctracker/sessions/${SESSION_ID}.tokens

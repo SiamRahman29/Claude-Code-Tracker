@@ -71,6 +71,8 @@ GET    /                       Dashboard
 
 Rate limiting: `POST /api/sessions` is limited to 10 requests/minute per IP.
 
+The backend is designed for personal/localhost use. If you expose it publicly, restrict `AllowedOrigins` in `backend/middleware/cors.go` to your specific frontend origin.
+
 ## Privacy model
 
 - User identity = SHA-256 of `hostname + username`, first 12 hex chars

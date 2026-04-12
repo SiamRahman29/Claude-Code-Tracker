@@ -13,6 +13,9 @@ func Init(path string) *sql.DB {
 		log.Fatalf("failed to open db: %v", err)
 	}
 
+	// SQLite supports one writer at a time; serialize writes through a single connection
+	db.SetMaxOpenConns(1)
+
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		log.Fatalf("failed to set WAL mode: %v", err)
 	}

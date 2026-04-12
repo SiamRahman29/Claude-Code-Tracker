@@ -24,16 +24,20 @@ PLUGINS="${PLUGINS%,}"
 SESSION_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(str(uuid.uuid4()))" 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(date +%s)-$$")
 START_TS=$(date +%s)
 
-# Write per-session state file (safe for concurrent sessions)
+# Write per-session state file using Python to safely encode strings (no heredoc injection)
 SESSION_FILE=~/.cctracker/sessions/${SESSION_ID}.json
-cat > "$SESSION_FILE" << JSONEOF
-{
-  "session_id": "${SESSION_ID}",
-  "start_ts": ${START_TS},
-  "model": "${MODEL}",
-  "plugins": "${PLUGINS}"
+export _CC_SID="$SESSION_ID" _CC_TS="$START_TS" _CC_MDL="$MODEL" _CC_PLG="$PLUGINS"
+python3 - <<'PYEOF'
+import json, os
+d = {
+    "session_id": os.environ["_CC_SID"],
+    "start_ts":   int(os.environ["_CC_TS"]),
+    "model":      os.environ["_CC_MDL"],
+    "plugins":    os.environ["_CC_PLG"],
 }
-JSONEOF
+with open(os.path.expanduser(f"~/.cctracker/sessions/{d['session_id']}.json"), "w") as f:
+    json.dump(d, f)
+PYEOF
 
 # Store session ID for this shell process so session-end.sh can find it
 echo "$SESSION_ID" > ~/.cctracker/sessions/.pid-$$.id

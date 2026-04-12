@@ -57,6 +57,14 @@ func CreateSession(db *sql.DB) http.HandlerFunc {
 			jsonError(w, "token_cost out of range", http.StatusBadRequest)
 			return
 		}
+		if len(s.Plugins) > 64 {
+			jsonError(w, "plugins too long", http.StatusBadRequest)
+			return
+		}
+		if len(s.ModelUsed) > 100 {
+			jsonError(w, "model_used too long", http.StatusBadRequest)
+			return
+		}
 
 		s.ID = uuid.New().String()
 		s.Country = "unknown"
@@ -88,6 +96,9 @@ func ListSessions(db *sql.DB) http.HandlerFunc {
 				limit = n
 			}
 		}
+		if limit > 500 {
+			limit = 500
+		}
 		if o := r.URL.Query().Get("offset"); o != "" {
 			if n, err := strconv.Atoi(o); err == nil && n >= 0 {
 				offset = n
@@ -118,6 +129,10 @@ func ListSessions(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			sessions = append(sessions, s)
+		}
+		if err := rows.Err(); err != nil {
+			jsonError(w, "db error", http.StatusInternalServerError)
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
