@@ -16,10 +16,12 @@ mkdir -p "$SKILL_DIR" "$HOOKS_DIR" ~/.cctracker
 cp "$(dirname "$0")/SKILL.md" "$SKILL_DIR/SKILL.md"
 
 # 3. Copy and chmod hooks
-cp "$(dirname "$0")/hooks/session-start.sh" "$HOOKS_DIR/session-start.sh"
-cp "$(dirname "$0")/hooks/session-end.sh" "$HOOKS_DIR/session-end.sh"
+cp "$(dirname "$0")/hooks/session-start.sh"     "$HOOKS_DIR/session-start.sh"
+cp "$(dirname "$0")/hooks/session-end.sh"       "$HOOKS_DIR/session-end.sh"
+cp "$(dirname "$0")/hooks/token-accumulator.sh" "$HOOKS_DIR/token-accumulator.sh"
 chmod +x "$HOOKS_DIR/session-start.sh"
 chmod +x "$HOOKS_DIR/session-end.sh"
+chmod +x "$HOOKS_DIR/token-accumulator.sh"
 
 # 4. Patch CLAUDE.md (add @import if not already present)
 IMPORT_LINE="@~/.claude/skills/cctracker/SKILL.md"
@@ -43,8 +45,9 @@ else:
     settings = {}
 
 new_hooks = {
-    "Start": [{"matcher": "", "hooks": [{"type": "command", "command": f"{hooks_dir}/session-start.sh"}]}],
-    "Stop":  [{"matcher": "", "hooks": [{"type": "command", "command": f"{hooks_dir}/session-end.sh"}]}]
+    "Start":       [{"matcher": "", "hooks": [{"type": "command", "command": f"{hooks_dir}/session-start.sh"}]}],
+    "Stop":        [{"matcher": "", "hooks": [{"type": "command", "command": f"{hooks_dir}/session-end.sh"}]}],
+    "PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": f"{hooks_dir}/token-accumulator.sh"}]}],
 }
 
 if "hooks" not in settings:

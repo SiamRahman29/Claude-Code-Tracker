@@ -28,8 +28,7 @@ if command -v jq >/dev/null 2>&1; then
     MODEL=$(jq -r '.model' "$SESSION_FILE")
     PLUGINS=$(jq -r '.plugins' "$SESSION_FILE")
 else
-    # Single python3 call — read all fields at once (no shell interpolation)
-    _PARSED=$(python3 - <<'PYEOF'
+    _PARSED=$(python3 -c "
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -37,14 +36,11 @@ try:
     print(d.get('model', 'unknown'))
     print(d.get('plugins', 'none'))
 except Exception:
-    print(0)
-    print('unknown')
-    print('none')
-PYEOF
-    )
+    print(0); print('unknown'); print('none')
+" "$SESSION_FILE" 2>/dev/null || printf "0\nunknown\nnone")
     START_TS=$(echo "$_PARSED" | sed -n '1p')
-    MODEL=$(echo "$_PARSED" | sed -n '2p')
-    PLUGINS=$(echo "$_PARSED" | sed -n '3p')
+    MODEL=$(echo "$_PARSED"    | sed -n '2p')
+    PLUGINS=$(echo "$_PARSED"  | sed -n '3p')
 fi
 
 END_TS=$(date +%s)
@@ -57,12 +53,65 @@ DURATION=$(( (END_TS - START_TS) / 60 ))
 USER_HASH=$(echo -n "$(hostname)$(whoami)" | openssl dgst -sha256 2>/dev/null | awk '{print $2}' | cut -c1-12)
 [ -z "$USER_HASH" ] && USER_HASH="unknown"
 
+# Compute token cost from accumulated token data (written by token-accumulator.sh PostToolUse hook)
+TOKENS_FILE=~/.cctracker/sessions/${SESSION_ID}.tokens
+export _CC_TOKENS_FILE="$TOKENS_FILE"
+export _CC_MODEL_FOR_COST="$MODEL"
+
+TOKEN_COST=$(python3 - <<'PYEOF'
+import os
+
+tokens_file = os.environ.get('_CC_TOKENS_FILE', '')
+model = os.environ.get('_CC_MODEL_FOR_COST', 'unknown').lower()
+
+# Pricing: (input, output, cache_read, cache_create) per million tokens
+PRICING = {
+    'claude-opus-4-6':        (15.00, 75.00, 1.500, 18.750),
+    'claude-sonnet-4-6':      ( 3.00, 15.00, 0.300,  3.750),
+    'claude-haiku-4-5':       ( 0.80,  4.00, 0.080,  1.000),
+    'claude-opus-4':          (15.00, 75.00, 1.500, 18.750),
+    'claude-sonnet-4':        ( 3.00, 15.00, 0.300,  3.750),
+    'claude-haiku-4':         ( 0.80,  4.00, 0.080,  1.000),
+    'claude-opus-3-7':        (15.00, 75.00, 1.500, 18.750),
+    'claude-sonnet-3-7':      ( 3.00, 15.00, 0.300,  3.750),
+    'claude-haiku-3-5':       ( 0.80,  4.00, 0.080,  1.000),
+}
+
+def get_pricing(m):
+    if m in PRICING:
+        return PRICING[m]
+    for key, val in PRICING.items():
+        if m.startswith(key):
+            return val
+    # Default to sonnet pricing
+    return PRICING['claude-sonnet-4-6']
+
+total_in = total_out = total_cr = total_cc = 0
+try:
+    with open(tokens_file) as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                total_in  += int(parts[0])
+                total_out += int(parts[1])
+            if len(parts) >= 4:
+                total_cr += int(parts[2])
+                total_cc += int(parts[3])
+except Exception:
+    pass
+
+p = get_pricing(model)
+cost = (total_in * p[0] + total_out * p[1] + total_cr * p[2] + total_cc * p[3]) / 1_000_000
+print(f"{cost:.4f}")
+PYEOF
+)
+TOKEN_COST="${TOKEN_COST:-0}"
+
 # Read classification written by /track skill
 CLASSIFICATION=~/.cctracker/classification_${SESSION_ID}.json
-# Fallback to latest if session-specific not found
 [ ! -f "$CLASSIFICATION" ] && CLASSIFICATION=~/.cctracker/classification_latest.json
 
-TASK_TYPE="other"; OUTCOME="complete"; REWORK_SCORE=1; SATISFACTION=3; TOKEN_COST=0
+TASK_TYPE="other"; OUTCOME="complete"; REWORK_SCORE=1; SATISFACTION=3
 
 if [ -f "$CLASSIFICATION" ]; then
     if command -v jq >/dev/null 2>&1; then
@@ -70,9 +119,7 @@ if [ -f "$CLASSIFICATION" ]; then
         OUTCOME=$(jq -r '.outcome // "complete"' "$CLASSIFICATION")
         REWORK_SCORE=$(jq -r '.rework_score // 1' "$CLASSIFICATION")
         SATISFACTION=$(jq -r '.satisfaction // 3' "$CLASSIFICATION")
-        TOKEN_COST=$(jq -r '.token_cost // 0' "$CLASSIFICATION")
     else
-        # All values read from env vars — no shell interpolation into python strings
         export _CC_CLASS_FILE="$CLASSIFICATION"
         _CVALS=$(python3 - <<'PYEOF'
 import json, os
@@ -82,21 +129,19 @@ try:
     print(d.get('outcome','complete'))
     print(d.get('rework_score',1))
     print(d.get('satisfaction',3))
-    print(d.get('token_cost',0))
 except Exception:
-    print('other'); print('complete'); print(1); print(3); print(0)
+    print('other'); print('complete'); print(1); print(3)
 PYEOF
         )
         TASK_TYPE=$(echo "$_CVALS" | sed -n '1p')
-        OUTCOME=$(echo "$_CVALS" | sed -n '2p')
+        OUTCOME=$(echo "$_CVALS"   | sed -n '2p')
         REWORK_SCORE=$(echo "$_CVALS" | sed -n '3p')
         SATISFACTION=$(echo "$_CVALS" | sed -n '4p')
-        TOKEN_COST=$(echo "$_CVALS" | sed -n '5p')
     fi
     rm -f "$CLASSIFICATION"
 fi
 
-_log_debug "Posting session $SESSION_ID: task=$TASK_TYPE outcome=$OUTCOME duration=${DURATION}m satisfaction=$SATISFACTION"
+_log_debug "Posting session $SESSION_ID: task=$TASK_TYPE outcome=$OUTCOME duration=${DURATION}m cost=\$$TOKEN_COST"
 
 # POST to backend (fire and forget — never block the user)
 # All shell vars passed as env vars; Python reads ONLY from os.environ (no shell injection)
@@ -139,5 +184,5 @@ except Exception:
 PYEOF
 
 # Cleanup
-rm -f "$SESSION_FILE" "$PID_FILE"
+rm -f "$SESSION_FILE" "$TOKENS_FILE" "$PID_FILE"
 exit 0

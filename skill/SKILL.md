@@ -22,13 +22,7 @@ produce false positives. Only run when the user explicitly asks.
    - **satisfaction**: integer 1–5
      - Infer from tone: frustrated/repeated corrections = 2, smooth/praise = 5
 
-3. Ask the user ONE question only:
-   "Before we close — quick tracking question. Token cost this session (check your
-   API dashboard), or press Enter to skip: $"
-
-   If they provide a number, use it. If they press Enter or say "skip", use 0.
-
-4. Find the session ID for this session. Check `~/.cctracker/sessions/.pid-*.id`
+3. Find the session ID for this session. Check `~/.cctracker/sessions/.pid-*.id`
    for the most recently modified file and read the session ID from it.
    Write the classification to `~/.cctracker/classification_${SESSION_ID}.json`:
 
@@ -37,16 +31,17 @@ produce false positives. Only run when the user explicitly asks.
   "task_type": "feature",
   "outcome": "complete",
   "rework_score": 1,
-  "satisfaction": 4,
-  "token_cost": 0.24
+  "satisfaction": 4
 }
 ```
 
 Use the Write tool. If no session ID can be found, write to
 `~/.cctracker/classification_latest.json` and session-end.sh will check both paths.
 
-5. Say: "✓ Session logged. Run `/exit` when ready — the hook will POST the data."
+4. Say: "✓ Session logged. Run `/exit` when ready — the hook will POST the data."
 
-## Privacy note
-Never include task descriptions, file names, or any content from the conversation
-in the classification. Only the categorical fields above are transmitted.
+## Notes
+- Token cost is captured automatically via the PostToolUse hook (token-accumulator.sh)
+  and computed at session end using model-based pricing. Do not ask the user for it.
+- Never include task descriptions, file names, or any content from the conversation
+  in the classification. Only the categorical fields above are transmitted.
