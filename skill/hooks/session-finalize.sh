@@ -1,64 +1,37 @@
 #!/usr/bin/env bash
-# hooks/session-end.sh
+# hooks/session-finalize.sh <session_id> [source]
+# Finalizes a session: computes duration + cost, POSTs once, cleans up.
+# Called by session-watchdog.sh (primary) and session-end.sh (fallback).
+# Dedup: atomic lockfile prevents double-POST across concurrent callers.
 set -euo pipefail
+
+SESSION_ID="${1:-}"
+SOURCE="${2:-unknown}"
 
 DEBUG_LOG=~/.cctracker/debug.log
 ERR_LOG=~/.cctracker/errors.log
 
-# Always return 0 so set -e doesn't abort on the conditional branch
-_log_debug() { if [ -n "${CCTRACKER_DEBUG:-}" ]; then echo "$(date): cctracker: $*" >> "$DEBUG_LOG"; fi; }
-_log_err()   { echo "$(date): cctracker ERROR: $*" >> "$ERR_LOG"; }
+_log_debug() { if [ -n "${CCTRACKER_DEBUG:-}" ]; then echo "$(date): cctracker finalize[$SOURCE]: $*" >> "$DEBUG_LOG"; fi; }
+_log_err()   { echo "$(date): cctracker finalize[$SOURCE] ERROR: $*" >> "$ERR_LOG"; }
+
+[ -z "$SESSION_ID" ] && exit 0
 
 # Validate backend URL
 if [ -z "${CCTRACKER_BACKEND:-}" ] || [ "${CCTRACKER_BACKEND}" = "https://your-server.com" ]; then
-    _log_err "CCTRACKER_BACKEND not set or still placeholder — skipping POST. Set it in your shell profile."
-    exit 0
-fi
-BACKEND_URL="$CCTRACKER_BACKEND"
-
-# Always-on mode: watchdog is the sole finalization path.
-# The Stop hook fires after every response turn — we must not POST here.
-if [ "${CCTRACKER_ENABLED:-}" = "1" ]; then
+    _log_err "CCTRACKER_BACKEND not set or still placeholder — skipping POST."
     exit 0
 fi
 
-# Only POST when the /cctracker skill has run and written a classification file.
-# The Stop hook fires after every response turn, so we must gate on the
-# classification file to avoid posting on every message.
-CLASSIFICATION=""
-# Prefer a session-specific classification file (written by /cctracker with session ID)
-for f in ~/.cctracker/classification_*.json; do
-    # Skip the generic fallback file
-    [ "$f" = "$HOME/.cctracker/classification_latest.json" ] && continue
-    [ -f "$f" ] && CLASSIFICATION="$f" && break
-done
-# Fall back to classification_latest.json if that's all we have
-[ -z "$CLASSIFICATION" ] && [ -f ~/.cctracker/classification_latest.json ] && CLASSIFICATION=~/.cctracker/classification_latest.json
-
-if [ -z "$CLASSIFICATION" ]; then
-    _log_debug "No classification file — /cctracker not run yet, skipping POST"
-    exit 0
-fi
-
-# Extract session ID from filename (classification_{uuid}.json) or read from .current_id
-SESSION_ID=""
-BASENAME=$(basename "$CLASSIFICATION" .json)
-if [ "$BASENAME" != "classification_latest" ]; then
-    SESSION_ID="${BASENAME#classification_}"
-fi
-if [ -z "$SESSION_ID" ] && [ -f ~/.cctracker/sessions/.current_id ]; then
-    SESSION_ID=$(cat ~/.cctracker/sessions/.current_id)
-fi
-if [ -z "$SESSION_ID" ]; then
-    _log_err "Cannot determine session ID — skipping POST"
-    rm -f "$CLASSIFICATION"
+# Atomic lockfile: only one caller proceeds (set -C disables clobber in subshell)
+LOCK_FILE=~/.cctracker/sessions/${SESSION_ID}.posted
+if ! ( set -C; echo "$$" > "$LOCK_FILE" ) 2>/dev/null; then
+    _log_debug "Already finalized (lockfile exists) — skipping"
     exit 0
 fi
 
 SESSION_FILE=~/.cctracker/sessions/${SESSION_ID}.json
 if [ ! -f "$SESSION_FILE" ]; then
     _log_err "Session file missing: $SESSION_FILE"
-    rm -f "$CLASSIFICATION"
     exit 0
 fi
 
@@ -79,21 +52,25 @@ except Exception:
     print(0); print('unknown'); print('none')
 " "$SESSION_FILE" 2>/dev/null || printf "0\nunknown\nnone")
     START_TS=$(echo "$_PARSED" | sed -n '1p')
-    MODEL=$(echo "$_PARSED"    | sed -n '2p')
-    PLUGINS=$(echo "$_PARSED"  | sed -n '3p')
+    MODEL=$(echo "$_PARSED"   | sed -n '2p')
+    PLUGINS=$(echo "$_PARSED" | sed -n '3p')
 fi
 
 END_TS=$(date +%s)
 DURATION=$(( (END_TS - START_TS) / 60 ))
 
-# Guard: skip nonsensical durations (also catches START_TS=0 parse failure which yields ~29M minutes)
+# Guard: skip nonsensical durations
 if [ "$DURATION" -le 0 ]; then
-    _log_debug "Duration <= 0, skipping post (will retry next turn)"
+    _log_debug "Duration <= 0, skipping"
+    rm -f "$LOCK_FILE"
     exit 0
 fi
 if [ "$DURATION" -gt 1440 ]; then
-    _log_debug "Duration > 24h ($DURATION min), likely bad start_ts — skipping post"
-    rm -f "$CLASSIFICATION" "$SESSION_FILE" ~/.cctracker/sessions/.current_id
+    _log_debug "Duration > 24h ($DURATION min), likely bad start_ts — skipping"
+    rm -f "$SESSION_FILE" "$LOCK_FILE" \
+        ~/.cctracker/sessions/${SESSION_ID}.tokens \
+        ~/.cctracker/sessions/${SESSION_ID}.watchdog_pid \
+        ~/.cctracker/sessions/.current_id 2>/dev/null || true
     exit 0
 fi
 
@@ -102,7 +79,7 @@ _HOST=$(hostname 2>/dev/null || uname -n 2>/dev/null || echo "localhost")
 USER_HASH=$(echo -n "${_HOST}$(whoami)" | openssl dgst -sha256 2>/dev/null | awk '{print $2}' | cut -c1-12)
 [ -z "$USER_HASH" ] && USER_HASH="fallbackuser"
 
-# Compute token cost from accumulated token data (written by token-accumulator.sh PostToolUse hook)
+# Compute token cost from accumulated token data
 TOKENS_FILE=~/.cctracker/sessions/${SESSION_ID}.tokens
 export _CC_TOKENS_FILE="$TOKENS_FILE"
 export _CC_MODEL_FOR_COST="$MODEL"
@@ -155,38 +132,15 @@ PYEOF
 )
 TOKEN_COST="${TOKEN_COST:-0}"
 
-# Read classification written by /cctracker skill
-TASK_TYPE="other"; OUTCOME="complete"; REWORK_SCORE=1; SATISFACTION=3
+# Always-on mode: use hardcoded defaults (no /track classification required)
+TASK_TYPE="other"
+OUTCOME="complete"
+REWORK_SCORE=1
+SATISFACTION=3
 
-if command -v jq >/dev/null 2>&1; then
-    TASK_TYPE=$(jq -r '.task_type // "other"' "$CLASSIFICATION")
-    OUTCOME=$(jq -r '.outcome // "complete"' "$CLASSIFICATION")
-    REWORK_SCORE=$(jq -r '.rework_score // 1' "$CLASSIFICATION")
-    SATISFACTION=$(jq -r '.satisfaction // 3' "$CLASSIFICATION")
-else
-    export _CC_CLASS_FILE="$CLASSIFICATION"
-    _CVALS=$(python3 - <<'PYEOF'
-import json, os
-try:
-    d = json.load(open(os.environ['_CC_CLASS_FILE']))
-    print(d.get('task_type','other'))
-    print(d.get('outcome','complete'))
-    print(d.get('rework_score',1))
-    print(d.get('satisfaction',3))
-except Exception:
-    print('other'); print('complete'); print(1); print(3)
-PYEOF
-    )
-    TASK_TYPE=$(echo "$_CVALS" | sed -n '1p')
-    OUTCOME=$(echo "$_CVALS"   | sed -n '2p')
-    REWORK_SCORE=$(echo "$_CVALS" | sed -n '3p')
-    SATISFACTION=$(echo "$_CVALS" | sed -n '4p')
-fi
-
-_log_debug "Posting session $SESSION_ID: task=$TASK_TYPE outcome=$OUTCOME duration=${DURATION}m cost=\$$TOKEN_COST"
+_log_debug "Posting session $SESSION_ID: duration=${DURATION}m cost=\$$TOKEN_COST source=$SOURCE"
 
 # POST to backend (fire and forget — never block the user)
-# All shell vars passed as env vars; Python reads ONLY from os.environ (no shell injection)
 export _CC_USER_HASH="$USER_HASH"
 export _CC_TASK_TYPE="$TASK_TYPE"
 export _CC_PLUGINS="$PLUGINS"
@@ -197,7 +151,7 @@ export _CC_SAT="$SATISFACTION"
 export _CC_COST="$TOKEN_COST"
 export _CC_MODEL="$MODEL"
 export _CC_SESSION="$SESSION_ID"
-export _CC_BACKEND="$BACKEND_URL"
+export _CC_BACKEND="$CCTRACKER_BACKEND"
 
 python3 - <<'PYEOF'
 import urllib.request, json, os
@@ -225,6 +179,10 @@ except Exception:
     pass  # Never block the user
 PYEOF
 
-# Cleanup — only after successful POST path
-rm -f "$CLASSIFICATION" "$SESSION_FILE" "$TOKENS_FILE" ~/.cctracker/sessions/.current_id
+# Cleanup — keep .posted lockfile (dedup gate for subsequent Stop hook turns)
+rm -f "$SESSION_FILE" \
+      ~/.cctracker/sessions/${SESSION_ID}.tokens \
+      ~/.cctracker/sessions/${SESSION_ID}.watchdog_pid \
+      ~/.cctracker/sessions/.current_id 2>/dev/null || true
+
 exit 0

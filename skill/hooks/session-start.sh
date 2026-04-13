@@ -25,7 +25,6 @@ SESSION_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(str(uuid.uuid
 START_TS=$(date +%s)
 
 # Write per-session state file using Python to safely encode strings (no heredoc injection)
-SESSION_FILE=~/.cctracker/sessions/${SESSION_ID}.json
 export _CC_SID="$SESSION_ID" _CC_TS="$START_TS" _CC_MDL="$MODEL" _CC_PLG="$PLUGINS"
 python3 - <<'PYEOF'
 import json, os
@@ -39,9 +38,30 @@ with open(os.path.expanduser(f"~/.cctracker/sessions/{d['session_id']}.json"), "
     json.dump(d, f)
 PYEOF
 
-# Store session ID for this shell process so session-end.sh can find it
-echo "$SESSION_ID" > ~/.cctracker/sessions/.pid-$$.id
+# Write a stable pointer that session-end.sh can always find, regardless of how
+# Claude Code spawns the hook subprocesses ($$ and $PPID are unreliable across
+# separate hook invocations).
+echo "$SESSION_ID" > ~/.cctracker/sessions/.current_id
 
-[ -n "${CCTRACKER_DEBUG:-}" ] && echo "$(date): cctracker start — session $SESSION_ID model=$MODEL plugins=$PLUGINS" >> ~/.cctracker/debug.log
+[ -n "${CCTRACKER_DEBUG:-}" ] && echo "$(date): cctracker start — session $SESSION_ID model=$MODEL plugins=$PLUGINS" >> ~/.cctracker/debug.log || true
+
+# Clean up stale files from old sessions (>7 days) to prevent accumulation
+find ~/.cctracker/sessions/ -name "*.posted"      -mtime +7 -delete 2>/dev/null || true
+find ~/.cctracker/sessions/ -name "*.watchdog_pid" -mtime +7 -delete 2>/dev/null || true
+
+# Always-on mode: start a background watchdog that detects session end on any exit type.
+# $PPID is the Claude Code process that spawned this hook — the PID to watch.
+if [ "${CCTRACKER_ENABLED:-}" = "1" ]; then
+    WATCHDOG=~/.cctracker/hooks/session-watchdog.sh
+    if [ -f "$WATCHDOG" ]; then
+        nohup bash "$WATCHDOG" "$SESSION_ID" "$PPID" > /dev/null 2>&1 &
+        WATCHDOG_PID=$!
+        disown "$WATCHDOG_PID" 2>/dev/null || true
+        echo "$WATCHDOG_PID" > ~/.cctracker/sessions/${SESSION_ID}.watchdog_pid
+        [ -n "${CCTRACKER_DEBUG:-}" ] && echo "$(date): cctracker watchdog launched — pid=$WATCHDOG_PID watching=$PPID" >> ~/.cctracker/debug.log || true
+    else
+        [ -n "${CCTRACKER_DEBUG:-}" ] && echo "$(date): cctracker watchdog script missing — $WATCHDOG" >> ~/.cctracker/debug.log || true
+    fi
+fi
 
 exit 0
