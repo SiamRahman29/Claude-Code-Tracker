@@ -3,10 +3,10 @@
 # PostToolUse hook — accumulates token usage from each API response
 set -euo pipefail
 
-PID_FILE=~/.cctracker/sessions/.pid-$$.id
-[ ! -f "$PID_FILE" ] && exit 0
+SESSION_ID_FILE=~/.cctracker/sessions/.current_id
+[ ! -f "$SESSION_ID_FILE" ] && exit 0
 
-SESSION_ID=$(cat "$PID_FILE")
+SESSION_ID=$(cat "$SESSION_ID_FILE")
 TOKENS_FILE=~/.cctracker/sessions/${SESSION_ID}.tokens
 
 STDIN=$(cat)

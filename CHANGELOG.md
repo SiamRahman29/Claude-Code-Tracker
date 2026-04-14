@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.1.0] - 2026-04-14
+
+### Added
+- Always-on session tracking (`CCTRACKER_ENABLED=1`): all sessions recorded automatically without any manual steps
+- `session-watchdog.sh`: background daemon that detects Claude Code process exit by any method (Ctrl+C, terminal close, `/exit`) and finalizes the session
+- `session-finalize.sh`: shared finalization script with atomic lockfile dedup — concurrent callers post exactly once
+- `skill/test/hooks.sh`: 7 integration tests covering lockfile dedup, duration guards, missing session file, always-on no-op, and token accumulation
+- `install.sh`: prompts for `CCTRACKER_ENABLED` during setup; copies new hook files automatically
+
+### Fixed
+- `token-accumulator.sh`: tokens were never accumulated (read from `.pid-$$.id` which was never created); now correctly reads `.current_id`
+- `session-end.sh`: in always-on mode, Stop hook is a pure no-op (watchdog is the sole finalization path, preventing 20+ duplicate POSTs per session)
+- `session-finalize.sh` / `session-end.sh`: `hostname` command not available on some WSL installs; falls back to `uname -n` then `localhost`
+
+### Changed
+- `skill/SKILL.md`: removed `/track` manual classification flow; documents always-on behavior
+- Session data now includes token cost computed from accumulated per-turn token counts
+
 ## [0.1.0.0] - 2026-04-12
 
 ### Added

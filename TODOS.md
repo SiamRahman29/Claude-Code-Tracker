@@ -1,5 +1,43 @@
 # TODOS
 
+## POST retry queue (P2)
+
+**What:** When the backend is unreachable, write the failed POST payload to
+`~/.cctracker/sessions/pending/<uuid>.json`. On next session-start.sh, flush any
+pending payloads before continuing.
+
+**Why:** Currently a backend blip silently loses session data. Fire-and-forget with
+5s timeout means any transient outage costs you data permanently.
+
+**Pros:** No data loss during backend downtime. Especially valuable for networked deployments.
+**Cons:** ~2 hours to implement. Adds file I/O on every session start (stat pending dir).
+Adds complexity to session-start.sh.
+
+**Context:** Identified during always-on redesign (2026-04-14). The always-on watchdog
+finalizes every session, so the window for data loss is now "backend unreachable at
+session-end" rather than "user forgot /track". A retry queue closes the last gap.
+
+**Depends on:** always-on tracking (v0.1.1) landing first.
+
+## Optional lightweight session rating (P3)
+
+**What:** After removing /track, all sessions default to task_type="other", outcome="complete",
+rework_score=1, satisfaction=3. Consider a post-session prompt that fires from
+session-watchdog.sh after POSTing — e.g., a whiptail/dialog terminal UI asking for a
+1-5 satisfaction rating, or a quick `/rate N` skill.
+
+**Why:** The rework heatmap and satisfaction trend charts lose signal quality. With all
+sessions at identical defaults, those dashboard panels show flat lines.
+
+**Pros:** Restores semantic data without requiring pre-session manual work.
+**Cons:** Post-exit prompts are intrusive (watchdog fires after terminal may be closed).
+Terminal UI availability (whiptail, dialog) varies by OS. Adds complexity to watchdog.
+
+**Context:** /track was removed in v0.1.1 to eliminate friction. This TODO explores
+a less-friction replacement that captures some semantic signal without blocking the user.
+
+**Depends on:** always-on tracking (v0.1.1) landing first.
+
 ## Dashboard: Per-section error/loading states
 
 **What:** Replace the all-or-nothing error banner with per-section loading and error states.

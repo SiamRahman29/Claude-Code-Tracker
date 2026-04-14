@@ -18,9 +18,13 @@ cp "$(dirname "$0")/SKILL.md" "$SKILL_DIR/SKILL.md"
 # 3. Copy and chmod hooks
 cp "$(dirname "$0")/hooks/session-start.sh"     "$HOOKS_DIR/session-start.sh"
 cp "$(dirname "$0")/hooks/session-end.sh"       "$HOOKS_DIR/session-end.sh"
+cp "$(dirname "$0")/hooks/session-finalize.sh"  "$HOOKS_DIR/session-finalize.sh"
+cp "$(dirname "$0")/hooks/session-watchdog.sh"  "$HOOKS_DIR/session-watchdog.sh"
 cp "$(dirname "$0")/hooks/token-accumulator.sh" "$HOOKS_DIR/token-accumulator.sh"
 chmod +x "$HOOKS_DIR/session-start.sh"
 chmod +x "$HOOKS_DIR/session-end.sh"
+chmod +x "$HOOKS_DIR/session-finalize.sh"
+chmod +x "$HOOKS_DIR/session-watchdog.sh"
 chmod +x "$HOOKS_DIR/token-accumulator.sh"
 
 # 4. Patch CLAUDE.md (add @import if not already present)
@@ -31,12 +35,30 @@ else
     echo "$IMPORT_LINE" > "$CLAUDE_MD"
 fi
 
-# 5. Patch settings.json hooks (safe merge via Python — no clobbering)
+# 5. Patch settings.json — hooks + backend URL env var (safe merge via Python)
+if [ -z "${CCTRACKER_BACKEND:-}" ] || [ "$CCTRACKER_BACKEND" = "https://your-server.com" ]; then
+    printf "Backend URL (e.g. http://localhost:8080): "
+    read -r CCTRACKER_BACKEND
+fi
+
+# Prompt for always-on tracking
+printf "Enable always-on tracking? All sessions tracked automatically, no /track needed (y/n, default y): "
+read -r _ENABLED_INPUT
+case "${_ENABLED_INPUT:-y}" in
+    [Nn]*) CCTRACKER_ENABLED="0" ;;
+    *)     CCTRACKER_ENABLED="1" ;;
+esac
+
+export _CC_BACKEND_URL="$CCTRACKER_BACKEND"
+export _CC_ENABLED="$CCTRACKER_ENABLED"
+
 python3 - << 'PYEOF'
 import json, os
 
 settings_path = os.path.expanduser("~/.claude/settings.json")
 hooks_dir = os.path.expanduser("~/.cctracker/hooks")
+backend_url = os.environ["_CC_BACKEND_URL"]
+enabled = os.environ["_CC_ENABLED"]
 
 if os.path.exists(settings_path):
     with open(settings_path) as f:
@@ -44,8 +66,14 @@ if os.path.exists(settings_path):
 else:
     settings = {}
 
+# Write backend URL into the env block so hooks always see it
+if "env" not in settings:
+    settings["env"] = {}
+settings["env"]["CCTRACKER_BACKEND"] = backend_url
+settings["env"]["CCTRACKER_ENABLED"] = enabled
+
 new_hooks = {
-    "Start":       [{"matcher": "", "hooks": [{"type": "command", "command": f"{hooks_dir}/session-start.sh"}]}],
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": f"{hooks_dir}/session-start.sh"}]}],
     "Stop":        [{"matcher": "", "hooks": [{"type": "command", "command": f"{hooks_dir}/session-end.sh"}]}],
     "PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": f"{hooks_dir}/token-accumulator.sh"}]}],
 }
@@ -74,11 +102,13 @@ PYEOF
 echo ""
 echo "✓ cctracker installed."
 echo ""
-echo "Next: set your backend URL:"
-echo "  export CCTRACKER_BACKEND=https://your-server.com"
-echo "  (Add to ~/.zshrc or ~/.bashrc to persist)"
-echo ""
 echo "Start the backend:"
 echo "  cd backend && go run main.go"
 echo ""
-echo "Use /track in any Claude Code session to log it."
+if [ "$CCTRACKER_ENABLED" = "1" ]; then
+    echo "Always-on tracking enabled. Sessions are recorded automatically."
+else
+    echo "Always-on tracking disabled. Use /track in sessions to log manually."
+fi
+echo ""
+echo "Run tests: bash skill/test/hooks.sh"
