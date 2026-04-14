@@ -4,15 +4,11 @@ Claude Code productivity tracker. Automatically captures session metadata via ho
 
 **What it tracks (anonymously):**
 - Session duration
-- Task type (feature/bug/debug/refactor/docs)
-- Outcome (complete/partial/abandoned)
-- Rework score (0-3)
-- Satisfaction (1-5, inferred by Claude from session tone)
-- Plugins active (gstack, ruflo)
 - Model used
-- Token cost (optional, manual entry)
+- Token cost (computed from per-turn token counts)
+- Plugins active (gstack, ruflo)
 
-**What it never tracks:** file names, code content, task descriptions, conversation history.
+**What it never tracks:** task type, outcome, satisfaction ratings, file names, code content, task descriptions, or conversation history.
 
 ## Quick start
 
@@ -32,9 +28,27 @@ cd skill
 CCTRACKER_BACKEND=http://localhost:8080 bash install.sh
 ```
 
-### 3. Track a session
+The installer will ask if you want always-on tracking enabled (default: yes). That's it — no further setup required.
 
-In any Claude Code session, type `/track` when done. Claude will classify the session, ask for token cost, and write a classification file. Exit Claude Code and the Stop hook POSTs it automatically.
+### 3. Use Claude Code normally
+
+With `CCTRACKER_ENABLED=1` (set by the installer), every session is recorded automatically. No manual steps. Exit however you want — `/exit`, Ctrl+C, or closing the terminal.
+
+## How it works
+
+```
+Session starts
+  → session-start.sh generates UUID, writes session JSON, starts background watchdog
+
+Per tool call
+  → token-accumulator.sh appends token counts to a per-session file
+
+Session ends (any method: /exit, Ctrl+C, terminal close)
+  → watchdog detects Claude Code PID is gone
+  → session-finalize.sh computes duration + token cost, POSTs once, cleans up
+```
+
+The watchdog polls the Claude Code PID every 5 seconds. When it detects the process is gone, it finalizes the session. An atomic lockfile (`set -C` noclobber) ensures exactly one POST per session regardless of how many concurrent exit paths fire.
 
 ## Configuration
 
@@ -43,7 +57,10 @@ In any Claude Code session, type `/track` when done. Claude will classify the se
 | `PORT` | `8080` | Backend listen port |
 | `DB_PATH` | `./cctracker.db` | SQLite database file path |
 | `CCTRACKER_BACKEND` | _(required)_ | Backend URL for hook scripts |
+| `CCTRACKER_ENABLED` | `0` | Set to `1` to enable always-on automatic tracking |
 | `CCTRACKER_DEBUG` | _(unset)_ | Set to `1` to enable debug logging to `~/.cctracker/debug.log` |
+
+Both `CCTRACKER_BACKEND` and `CCTRACKER_ENABLED` are written to `~/.claude/settings.json` by the installer.
 
 ## Self-hosting
 
@@ -56,6 +73,18 @@ CGO_ENABLED=0 go build -o cctracker .
 ```
 
 Set `DB_PATH` to a persistent path (e.g., `/var/lib/cctracker/data.db`).
+
+## Testing
+
+```bash
+# Backend (Go)
+cd backend && go test ./...
+
+# Hook integration tests (requires python3 + openssl)
+bash skill/test/hooks.sh
+```
+
+The hook test suite spins up a local mock HTTP server, runs each hook in an isolated temp directory, and verifies POST counts, lockfile behavior, and token accumulation.
 
 ## API
 
@@ -84,15 +113,22 @@ The backend is designed for personal/localhost use. If you expose it publicly, r
 
 ```
 cctracker/
-├── backend/          # Go + Chi + SQLite API server + embedded dashboard
+├── backend/              # Go + Chi + SQLite API server + embedded dashboard
 │   ├── main.go
-│   ├── handlers/     # HTTP handlers
-│   ├── models/       # Session struct + stats types
-│   ├── db/           # SQLite init (WAL mode)
-│   ├── middleware/   # CORS + per-IP rate limiting
-│   └── dashboard/    # Single-file HTML dashboard (no external deps)
-└── skill/            # Claude Code skill
-    ├── SKILL.md      # Skill instructions (triggered by /track)
-    ├── hooks/        # session-start.sh + session-end.sh
-    └── install.sh    # One-command installer
+│   ├── handlers/         # HTTP handlers
+│   ├── models/           # Session struct + stats types
+│   ├── db/               # SQLite init (WAL mode)
+│   ├── middleware/       # CORS + per-IP rate limiting
+│   └── dashboard/        # Single-file HTML dashboard (no external deps)
+└── skill/                # Claude Code hooks + installer
+    ├── SKILL.md          # Documents always-on behavior
+    ├── hooks/
+    │   ├── session-start.sh       # Writes session JSON, launches watchdog
+    │   ├── session-watchdog.sh    # Background daemon: detects process exit
+    │   ├── session-finalize.sh    # Shared finalization: POST + lockfile dedup
+    │   ├── session-end.sh         # Stop hook (no-op in always-on mode)
+    │   └── token-accumulator.sh  # Appends per-turn token counts
+    ├── test/
+    │   └── hooks.sh      # Integration tests (7 tests, mock backend)
+    └── install.sh        # One-command installer
 ```
